@@ -1,0 +1,9 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python relay.py",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
