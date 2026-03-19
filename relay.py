@@ -33,7 +33,6 @@ async def handle(websocket):
 
             await websocket.send("READY")
 
-            # Relay audio GhostEye → Specter
             async for data in websocket:
                 try:
                     await specter_ws.send(data)
@@ -51,16 +50,17 @@ async def handle(websocket):
             if code in waiters and not waiters[code].done():
                 waiters[code].set_result(websocket)
 
-            # Mantener conexión abierta
             await websocket.wait_closed()
 
     except Exception as e:
         print(f"Error: {e}")
+    finally:
+        clients.pop(next((k for k,v in clients.items() if v==websocket), None), None)
 
 async def main():
     port = int(os.environ.get("PORT", 8765))
     print(f"Relay WebSocket corriendo en puerto {port}")
-    async with websockets.serve(handle, "0.0.0.0", port):
+    async with websockets.serve(handle, "0.0.0.0", port, ping_interval=20, ping_timeout=60):
         await asyncio.Future()
 
 asyncio.run(main())
