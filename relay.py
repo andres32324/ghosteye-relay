@@ -1,4 +1,5 @@
-import asyncio
+
+ import asyncio
 import websockets
 import random
 import string
@@ -13,7 +14,7 @@ def gen_code():
         if code not in clients:
             return code
 
-async def handle(websocket, path):
+async def handle(websocket):
     try:
         role = await asyncio.wait_for(websocket.recv(), timeout=10)
 
@@ -31,7 +32,6 @@ async def handle(websocket, path):
 
             clients[code] = websocket
             waiters[code] = asyncio.get_event_loop().create_future()
-
             await websocket.send(f"CODE:{code}")
 
             try:
@@ -54,12 +54,9 @@ async def handle(websocket, path):
             if code not in clients:
                 await websocket.send("ERROR:INVALID_CODE")
                 return
-
             await websocket.send("OK")
-
             if code in waiters and not waiters[code].done():
                 waiters[code].set_result(websocket)
-
             await websocket.wait_closed()
 
     except Exception as e:
@@ -67,12 +64,14 @@ async def handle(websocket, path):
     finally:
         clients.pop(next((k for k,v in clients.items() if v==websocket), None), None)
 
-start_server = websockets.serve(
-    handle, "0.0.0.0", int(os.environ.get("PORT", 8765)),
-    ping_interval=None,
-    ping_timeout=None
-)
+async def main():
+    port = int(os.environ.get("PORT", 8765))
+    print(f"Relay corriendo en puerto {port}")
+    async with websockets.serve(
+        handle, "0.0.0.0", port,
+        ping_interval=None,
+        ping_timeout=None
+    ):
+        await asyncio.Future()
 
-print(f"Relay corriendo en puerto {os.environ.get('PORT', 8765)}")
-asyncio.get_event_loop().run_until_complete(start_server)
-asyncio.get_event_loop().run_forever()
+asyncio.run(main())
