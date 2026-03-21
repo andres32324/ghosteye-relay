@@ -13,12 +13,11 @@ def gen_code():
         if code not in clients:
             return code
 
-async def handle(websocket):
+async def handle(websocket, path):
     try:
         role = await asyncio.wait_for(websocket.recv(), timeout=10)
 
         if role == "EMIT" or role.startswith("EMIT:"):
-            # Usar código propuesto o generar nuevo
             if role.startswith("EMIT:"):
                 code = role[5:].strip()
                 if not code.isdigit() or len(code) != 6:
@@ -26,7 +25,6 @@ async def handle(websocket):
             else:
                 code = gen_code()
 
-            # Si ya existe una sesión con ese código, reemplazarla
             clients.pop(code, None)
             if code in waiters and not waiters[code].done():
                 waiters[code].cancel()
@@ -69,10 +67,12 @@ async def handle(websocket):
     finally:
         clients.pop(next((k for k,v in clients.items() if v==websocket), None), None)
 
-async def main():
-    port = int(os.environ.get("PORT", 8765))
-    print(f"Relay corriendo en puerto {port}")
-    async with websockets.serve(handle, "0.0.0.0", port, ping_interval=20, ping_timeout=60):
-        await asyncio.Future()
+start_server = websockets.serve(
+    handle, "0.0.0.0", int(os.environ.get("PORT", 8765)),
+    ping_interval=None,
+    ping_timeout=None
+)
 
-asyncio.run(main())
+print(f"Relay corriendo en puerto {os.environ.get('PORT', 8765)}")
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
