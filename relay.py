@@ -63,6 +63,11 @@ async def handle(websocket):
     finally:
         clients.pop(next((k for k,v in clients.items() if v==websocket), None), None)
 
+async def keepalive():
+    while True:
+        await asyncio.sleep(270)  # cada 4.5 minutos
+        print(f"keepalive — clientes activos: {len(clients)}")
+
 async def main():
     port = int(os.environ.get("PORT", 8765))
     print(f"Relay corriendo en puerto {port}")
@@ -71,6 +76,10 @@ async def main():
         ping_interval=None,
         ping_timeout=None
     ):
-        await asyncio.Future()
+        await asyncio.gather(
+            asyncio.Future(),
+            keepalive()
+        )
 
 asyncio.run(main())
+ 
