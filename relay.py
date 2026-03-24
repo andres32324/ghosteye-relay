@@ -57,8 +57,16 @@ async def handle(request):
             await ws.send_str("OK")
             if code in waiters and not waiters[code].done():
                 waiters[code].set_result(ws)
+            # ✅ Reenviar mensajes de Specter → GhostEye 2
+            ghosteye_ws = clients.get(code)
             async for msg in ws:
-                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    # Reenviar texto de Specter a GhostEye 2 (ej: STOP)
+                    ghosteye_ws = clients.get(code)
+                    if ghosteye_ws:
+                        try: await ghosteye_ws.send_str(msg.data)
+                        except Exception: pass
+                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
     except Exception as e:
         print(f"Error: {e}")
