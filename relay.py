@@ -11,7 +11,7 @@ watchers = {}  # code -> set de ws en modo WATCH
 
 def gen_code():
     while True:
-        code = ''.join(random.choices(string.digits, k=6))
+        code = ''.join(random.choices(string.digits, k=4))
         if code not in clients:
             return code
 
