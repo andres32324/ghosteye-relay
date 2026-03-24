@@ -26,7 +26,7 @@ async def handle(request):
         if role == "EMIT" or role.startswith("EMIT:"):
             if role.startswith("EMIT:"):
                 code = role[5:].strip()
-                if not code.isdigit() or len(code) != 6:
+                if not code.isdigit() or len(code) != 4:
                     code = gen_code()
             else:
                 code = gen_code()
