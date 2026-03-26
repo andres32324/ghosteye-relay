@@ -5,10 +5,11 @@ import random
 import string
 import os
 
-emitters  = {}   # code -> ghosteye ws
-listeners = {}   # code -> specter ws (JOIN audio)
-watchers  = {}   # code -> set de ws en modo WATCH
-last_info = {}   # code -> ultimo INFO recibido
+emitters   = {}   # code -> ghosteye ws
+listeners  = {}   # code -> specter ws (JOIN audio)
+watchers   = {}   # code -> set de ws en modo WATCH
+last_info  = {}   # code -> ultimo INFO recibido
+last_codes = {}   # device_id -> ultimo code activo
 
 def gen_code():
     while True:
@@ -47,6 +48,8 @@ async def handle(request):
             emitters[code] = ws
             if code not in watchers:
                 watchers[code] = set()
+            # ✅ Guardar ultimo código activo
+            last_codes[code] = code
             await ws.send_str(f"CODE:{code}")
 
             async for msg in ws:
@@ -98,7 +101,12 @@ async def handle(request):
         elif text.startswith("JOIN:"):
             code = text[5:].strip()
             if code not in emitters:
-                await ws.send_str("ERROR:INVALID_CODE")
+                # ✅ Buscar si hay un nuevo código activo para este dispositivo
+                new_code = next((c for c in emitters if c != code), None)
+                if new_code:
+                    await ws.send_str(f"NEWCODE:{new_code}")
+                else:
+                    await ws.send_str("ERROR:INVALID_CODE")
                 return ws
             role = "JOIN"
             listeners[code] = ws
@@ -124,7 +132,12 @@ async def handle(request):
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
             if code not in emitters:
-                await ws.send_str("ERROR:INVALID_CODE")
+                # ✅ Buscar si hay un nuevo código activo
+                new_code = next((c for c in emitters if c != code), None)
+                if new_code:
+                    await ws.send_str(f"NEWCODE:{new_code}")
+                else:
+                    await ws.send_str("ERROR:INVALID_CODE")
                 return ws
             role = "WATCH"
             if code not in watchers:
