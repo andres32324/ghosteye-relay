@@ -24,6 +24,24 @@ async def safe_send_str(ws, msg, group, code):
         if code in group and isinstance(group[code], set):
             group[code].discard(ws)
 
+async def handle_ping(request):
+    """Endpoint HTTP para keepalive — evita que Render duerma el servicio"""
+    return web.Response(text="GhostEye Relay OK", status=200)
+
+async def self_ping(app):
+    """Ping automatico cada 4 minutos para mantener el servicio despierto"""
+    import aiohttp as _aiohttp
+    url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not url:
+        return
+    while True:
+        await asyncio.sleep(4 * 60)
+        try:
+            async with _aiohttp.ClientSession() as session:
+                await session.get(url + "/ping", timeout=_aiohttp.ClientTimeout(total=10))
+        except Exception:
+            pass
+
 async def handle(request):
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
@@ -119,7 +137,7 @@ async def handle(request):
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    # Mensajes de Specter → GhostEye 2 (STOP, GET_GPS, etc)
+                    # Mensajes de Specter → GhostEye 2 (STOP, RESTART, etc)
                     emitter = emitters.get(code)
                     if emitter:
                         try: await emitter.send_str(msg.data)
