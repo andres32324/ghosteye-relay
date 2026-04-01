@@ -10,6 +10,7 @@ listeners  = {}   # code -> specter ws (JOIN audio)
 watchers   = {}   # code -> set de ws en modo WATCH
 last_info  = {}   # code -> ultimo INFO recibido
 last_codes = {}   # device_id -> ultimo code activo
+pending_ready = set()  # codes con listener esperando READY
 
 def gen_code():
     while True:
@@ -70,11 +71,12 @@ async def handle(request):
             last_codes[code] = code
             await ws.send_str(f"CODE:{code}")
 
-            # ✅ Si ya hay un listener esperando, enviar READY inmediatamente
+            # ✅ Si hay listener esperando (pending o activo), enviar READY inmediatamente
             listener = listeners.get(code)
-            if listener:
+            if listener or code in pending_ready:
                 try:
                     await ws.send_str("READY")
+                    pending_ready.discard(code)
                 except Exception:
                     pass
 
@@ -132,8 +134,14 @@ async def handle(request):
             await ws.send_str("OK")
             emitter = emitters.get(code)
             if emitter:
-                try: await emitter.send_str("READY")
-                except Exception: pass
+                try:
+                    await emitter.send_str("READY")
+                except Exception:
+                    # ✅ Emisor no responde — guardar como pending
+                    pending_ready.add(code)
+            else:
+                # ✅ Emisor no conectado aún — guardar como pending
+                pending_ready.add(code)
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -144,6 +152,7 @@ async def handle(request):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
             listeners.pop(code, None)
+            pending_ready.discard(code)
             # ✅ Specter se desconectó — parar micrófono de GhostEye 2
             emitter = emitters.get(code)
             if emitter:
