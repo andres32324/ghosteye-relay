@@ -4,11 +4,17 @@ from aiohttp import web
 import random
 import string
 import os
+import time
 
 emitters  = {}
 listeners = {}
 watchers  = {}
 last_info = {}
+
+# ── Registro Lyn ──
+lyn_registry = {}      # {code: {ip, localIp, timestamp}}
+lyn_emitters = {}      # {code: ws}  — Lyn conectado por WS
+lyn_listeners = {}     # {code: {video: ws, audio: ws}}
 
 def gen_code():
     while True:
@@ -35,11 +41,9 @@ async def safe_send_bytes(ws, data):
     return False
 
 async def cleanup_code(code, role, ws):
-    """Limpieza centralizada — siempre se ejecuta"""
     if role == "EMIT":
         if emitters.get(code) is ws:
             emitters.pop(code, None)
-        # Notificar listener
         listener = listeners.get(code)
         if listener and not listener.closed:
             await safe_send_str(listener, "EMITTER_GONE")
@@ -47,7 +51,6 @@ async def cleanup_code(code, role, ws):
     elif role == "JOIN":
         if listeners.get(code) is ws:
             listeners.pop(code, None)
-        # Parar micrófono
         emitter = emitters.get(code)
         if emitter and not emitter.closed:
             await safe_send_str(emitter, "STOP")
@@ -56,8 +59,70 @@ async def cleanup_code(code, role, ws):
         if code in watchers:
             watchers[code].discard(ws)
 
+    elif role == "LYN_EMIT":
+        if lyn_emitters.get(code) is ws:
+            lyn_emitters.pop(code, None)
+        # Notificar a Pulso que Lyn se desconectó
+        listeners_lyn = lyn_listeners.get(code, {})
+        for ws_listener in listeners_lyn.values():
+            if ws_listener and not ws_listener.closed:
+                await safe_send_str(ws_listener, "LYN_GONE")
+
+    elif role == "LYN_VIDEO":
+        listeners_lyn = lyn_listeners.get(code, {})
+        if listeners_lyn.get("video") is ws:
+            listeners_lyn.pop("video", None)
+
+    elif role == "LYN_AUDIO":
+        listeners_lyn = lyn_listeners.get(code, {})
+        if listeners_lyn.get("audio") is ws:
+            listeners_lyn.pop("audio", None)
+
 async def handle_ping(request):
     return web.Response(text="GhostEye Relay OK", status=200)
+
+# ── Lyn registra su IP (HTTP) ──
+async def handle_lyn_register(request):
+    try:
+        data = await request.json()
+        code = data.get("code", "").strip().upper()
+        ip = data.get("ip", "").strip()
+        local_ip = data.get("localIp", "").strip()
+
+        if not code or not ip:
+            return web.json_response({"error": "code e ip requeridos"}, status=400)
+
+        lyn_registry[code] = {
+            "ip": ip,
+            "localIp": local_ip,
+            "timestamp": time.time()
+        }
+        print(f"Lyn registrado: code={code} ip={ip} localIp={local_ip}")
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+# ── Pulso consulta IP por código (HTTP) ──
+async def handle_lyn_lookup(request):
+    code = request.match_info.get("code", "").strip().upper()
+    if not code:
+        return web.json_response({"error": "código requerido"}, status=400)
+
+    entry = lyn_registry.get(code)
+    if not entry:
+        return web.json_response({"error": "código no encontrado"}, status=404)
+
+    age = time.time() - entry["timestamp"]
+    if age > 86400:
+        lyn_registry.pop(code, None)
+        return web.json_response({"error": "código expirado"}, status=404)
+
+    return web.json_response({
+        "ok": True,
+        "ip": entry["ip"],
+        "localIp": entry.get("localIp", ""),
+        "code": code
+    })
 
 async def self_ping(app):
     url = os.environ.get("RAILWAY_STATIC_URL", os.environ.get("RENDER_EXTERNAL_URL", ""))
@@ -73,15 +138,14 @@ async def self_ping(app):
         except Exception:
             pass
 
+# ── WebSocket Specter/GhostEye (sin cambios) ──
 async def handle(request):
-    # ✅ heartbeat=15 — detecta zombies, no tan agresivo
     ws = web.WebSocketResponse(heartbeat=15)
     await ws.prepare(request)
     code = None
     role = None
 
     try:
-        # Timeout inicial para recibir el primer mensaje
         try:
             msg = await asyncio.wait_for(ws.receive(), timeout=15)
         except asyncio.TimeoutError:
@@ -94,7 +158,6 @@ async def handle(request):
 
         text = msg.data.strip()
 
-        # ── GHOSTEYE 2 emisor ──
         if text == "EMIT" or text.startswith("EMIT:"):
             if text.startswith("EMIT:"):
                 code = text[5:].strip()
@@ -104,8 +167,6 @@ async def handle(request):
                 code = gen_code()
 
             role = "EMIT"
-
-            # Cerrar emisor anterior si existe
             old = emitters.get(code)
             if old and not old.closed:
                 try:
@@ -119,7 +180,6 @@ async def handle(request):
 
             await safe_send_str(ws, f"CODE:{code}")
 
-            # ✅ Si Specter ya está esperando — READY inmediato
             listener = listeners.get(code)
             if listener and not listener.closed:
                 await safe_send_str(ws, "READY")
@@ -166,7 +226,6 @@ async def handle(request):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
 
-        # ── SPECTER oyente con audio ──
         elif text.startswith("JOIN:"):
             code = text[5:].strip()
             if code not in emitters:
@@ -175,8 +234,6 @@ async def handle(request):
                 return ws
 
             role = "JOIN"
-
-            # Cerrar listener anterior zombie
             old = listeners.get(code)
             if old and not old.closed:
                 try:
@@ -187,12 +244,10 @@ async def handle(request):
             listeners[code] = ws
             await safe_send_str(ws, "OK")
 
-            # ✅ READY inmediato
             emitter = emitters.get(code)
             if emitter and not emitter.closed:
                 await safe_send_str(emitter, "READY")
 
-            # ✅ Último INFO inmediato
             if code in last_info:
                 await safe_send_str(ws, last_info[code])
 
@@ -204,7 +259,6 @@ async def handle(request):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
 
-        # ── SPECTER solo info (WATCH) ──
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
             if code not in emitters:
@@ -236,7 +290,134 @@ async def handle(request):
     except Exception as e:
         print(f"Error handle [{role}][{code}]: {e}")
     finally:
-        # ✅ Limpieza SIEMPRE — nunca zombie
+        if code and role:
+            await cleanup_code(code, role, ws)
+        if not ws.closed:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+    return ws
+
+# ── WebSocket Lyn/Pulso ──
+async def handle_lyn(request):
+    ws = web.WebSocketResponse(heartbeat=15)
+    await ws.prepare(request)
+    code = None
+    role = None
+
+    try:
+        try:
+            msg = await asyncio.wait_for(ws.receive(), timeout=15)
+        except asyncio.TimeoutError:
+            await ws.close()
+            return ws
+
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            await ws.close()
+            return ws
+
+        text = msg.data.strip()
+
+        # ── Lyn emisor ──
+        if text.startswith("LYN_EMIT:"):
+            code = text[9:].strip().upper()
+            role = "LYN_EMIT"
+
+            old = lyn_emitters.get(code)
+            if old and not old.closed:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+
+            lyn_emitters[code] = ws
+            if code not in lyn_listeners:
+                lyn_listeners[code] = {}
+
+            await safe_send_str(ws, "READY")
+            print(f"Lyn emisor conectado: {code}")
+
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    # Primero byte indica tipo: 0=video, 1=audio
+                    if len(msg.data) < 1:
+                        continue
+                    msg_type = msg.data[0]
+                    payload = msg.data[1:]
+
+                    listeners_lyn = lyn_listeners.get(code, {})
+                    if msg_type == 0:  # Video
+                        video_ws = listeners_lyn.get("video")
+                        if video_ws and not video_ws.closed:
+                            await safe_send_bytes(video_ws, payload)
+                    elif msg_type == 1:  # Audio
+                        audio_ws = listeners_lyn.get("audio")
+                        if audio_ws and not audio_ws.closed:
+                            await safe_send_bytes(audio_ws, payload)
+
+                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                    break
+
+        # ── Pulso receptor video ──
+        elif text.startswith("PULSO_VIDEO:"):
+            code = text[12:].strip().upper()
+            role = "LYN_VIDEO"
+
+            if code not in lyn_listeners:
+                lyn_listeners[code] = {}
+
+            old = lyn_listeners[code].get("video")
+            if old and not old.closed:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+
+            lyn_listeners[code]["video"] = ws
+            await safe_send_str(ws, "OK")
+            print(f"Pulso video conectado: {code}")
+
+            # Notificar a Lyn que Pulso está listo
+            lyn_emitter = lyn_emitters.get(code)
+            if lyn_emitter and not lyn_emitter.closed:
+                await safe_send_str(lyn_emitter, "PULSO_READY")
+
+            async for msg in ws:
+                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                    break
+
+        # ── Pulso receptor audio ──
+        elif text.startswith("PULSO_AUDIO:"):
+            code = text[12:].strip().upper()
+            role = "LYN_AUDIO"
+
+            if code not in lyn_listeners:
+                lyn_listeners[code] = {}
+
+            old = lyn_listeners[code].get("audio")
+            if old and not old.closed:
+                try:
+                    await old.close()
+                except Exception:
+                    pass
+
+            lyn_listeners[code]["audio"] = ws
+            await safe_send_str(ws, "OK")
+            print(f"Pulso audio conectado: {code}")
+
+            async for msg in ws:
+                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                    break
+
+        else:
+            await ws.close()
+            return ws
+
+    except Exception as e:
+        print(f"Error handle_lyn [{role}][{code}]: {e}")
+    finally:
         if code and role:
             await cleanup_code(code, role, ws)
         if not ws.closed:
@@ -249,15 +430,19 @@ async def handle(request):
 
 async def main():
     port = int(os.environ.get("PORT", 8765))
-    app = web.Application()
+    app = web.Application(client_max_size=5*1024*1024)  # 5MB max para frames
     app.router.add_get("/", handle)
     app.router.add_get("/ws", handle)
     app.router.add_get("/ping", handle_ping)
+    app.router.add_get("/lyn", handle_lyn)
+    app.router.add_post("/lyn/register", handle_lyn_register)
+    app.router.add_get("/lyn/lookup/{code}", handle_lyn_lookup)
+
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Relay PRO v2 corriendo en puerto {port}")
+    print(f"Relay PRO v3 + Lyn corriendo en puerto {port}")
     asyncio.ensure_future(self_ping(app))
     await asyncio.Future()
 
